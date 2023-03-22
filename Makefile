@@ -1,5 +1,5 @@
 CC = gcc
-CXX = g++
+CXX = g++-11
 CFLAGS = -pthread -fopenmp -O2
 CFLAGS += -Wall -Wextra
 CXXFLAGS = -std=c++2a $(CFLAGS)
