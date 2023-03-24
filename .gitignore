@@ -2,4 +2,7 @@
 .DS_Store
 109062131_hw1
 
+testcases
+!testcases/sample
+!testcases/sample.out
 outputs
