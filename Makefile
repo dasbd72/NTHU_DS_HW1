@@ -2,6 +2,9 @@ CC = gcc
 CXX = g++-11
 CFLAGS = -pthread -fopenmp -O2
 CFLAGS += -Wall -Wextra
+# CFLAGS += -DTIMING
+# CFLAGS += -DDEBUG
+# CFLAGS += -g -fsanitize=address
 CXXFLAGS = -std=c++2a $(CFLAGS)
 
 TARGETS = 109062131_hw1
@@ -14,4 +17,4 @@ all: $(TARGETS)
 
 .PHONY: clean
 clean:
-	rm $(TARGETS)
+	rm -f $(TARGETS)
