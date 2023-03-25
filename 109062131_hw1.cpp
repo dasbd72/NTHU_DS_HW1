@@ -43,6 +43,25 @@
         std::cout << #arg << " took " << __duration_##arg << "s.\n";                          \
         std::cout.flush();                                                                    \
     }
+#define TIMING_INIT(arg) \
+    double __duration_##arg = 0;
+#define TIMING_ACCUM(arg)                                                                      \
+    {                                                                                          \
+        struct timespec __temp_##arg, __end_##arg;                                             \
+        clock_gettime(CLOCK_MONOTONIC, &__end_##arg);                                          \
+        if ((__end_##arg.tv_nsec - __start_##arg.tv_nsec) < 0) {                               \
+            __temp_##arg.tv_sec = __end_##arg.tv_sec - __start_##arg.tv_sec - 1;               \
+            __temp_##arg.tv_nsec = 1000000000 + __end_##arg.tv_nsec - __start_##arg.tv_nsec;   \
+        } else {                                                                               \
+            __temp_##arg.tv_sec = __end_##arg.tv_sec - __start_##arg.tv_sec;                   \
+            __temp_##arg.tv_nsec = __end_##arg.tv_nsec - __start_##arg.tv_nsec;                \
+        }                                                                                      \
+        __duration_##arg += __temp_##arg.tv_sec + (double)__temp_##arg.tv_nsec / 1000000000.0; \
+    }
+#define TIMING_FIN(arg)                                          \
+    std::cout << #arg << " took " << __duration_##arg << "s.\n"; \
+    std::cout.flush();
+TIMING_INIT(fpgrowth_combination);
 #else
 #define TIMING_START(arg)
 #define TIMING_END(arg)
@@ -87,18 +106,22 @@ struct FPTree {
     std::unordered_map<Item, FPNode*> hdr_table;
     std::vector<Item> items_by_freq;          // items above minimum support, sorts decreasing by frequency
     std::unordered_map<Item, int> item_freq;  // item frequency count
+    bool singlePath;
 
     FPTree() {
         root = new FPNode(-1);
+        singlePath = true;
     }
     ~FPTree() {
         deleteTree(root);
     };
 
+    void insertPath(const Transaction& trxn, std::unordered_map<Item, FPNode*>& tail_table, const int& inc);
     void buildFromTrxns(const std::vector<Transaction>& trxns, const int& min_sup);
-    void fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size);
+    void growth(FPNode* preroot, FPNode* prehead, const int& min_sup);
     void fpgrowthCombination(int idx, std::vector<Item>& lst, const std::string& base, std::ofstream& output_file, const size_t& trxns_size);
-    void fpgrowth(Transaction& base, const int& min_sup, std::ofstream& ofs, const size_t& trxns_size);
+    void fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size);
+    void fpgrowth(Transaction& base, const int& min_sup, std::ofstream& output_file, const size_t& trxns_size);
 
     bool empty();
     bool hasSinglePath();
@@ -147,15 +170,40 @@ int main(int argc, char** argv) {
     TIMING_START(fpgrowth_and_output);
     fptree.fpgrowth(output_filename, min_sup, trxns.size());
     TIMING_END(fpgrowth_and_output);
+    TIMING_FIN(fpgrowth_combination);
     TIMING_END(total);
 
     return 0;
 }
 
+void FPTree::insertPath(const Transaction& trxn, std::unordered_map<Item, FPNode*>& tail_table, const int& inc) {
+    FPNode* curr = root;
+    for (int j = (int)trxn.size() - 1; j >= 0; j--) {
+        Item item = trxn[j];
+        auto it = curr->child.find(item);
+        // if exist move curr, else create and move
+        if (it != curr->child.end()) {
+            curr = it->second;
+        } else {
+            if (curr->child.size() >= 1)
+                singlePath = false;
+            FPNode* node = new FPNode(item);
+            node->parent = curr;
+            curr = curr->child[item] = node;
+            if (tail_table.find(item) == tail_table.end()) {
+                hdr_table[item] = tail_table[item] = node;
+            } else {
+                tail_table[item] = tail_table[item]->next = node;
+            }
+        }
+        curr->cnt += inc;
+    }
+}
+
 void FPTree::buildFromTrxns(const std::vector<Transaction>& trxns, const int& min_sup) {
-    for (int i = 0; i < MAXITEM; i++) {
-        if (item_freq[i] >= min_sup) {
-            items_by_freq.emplace_back(i);
+    for (auto& pair : item_freq) {
+        if (pair.second >= min_sup) {
+            items_by_freq.emplace_back(pair.first);
         }
     }
     std::sort(items_by_freq.begin(), items_by_freq.end(), REFDEC(item_freq));
@@ -173,26 +221,63 @@ void FPTree::buildFromTrxns(const std::vector<Transaction>& trxns, const int& mi
         std::sort(trxn.begin(), trxn.end(), REFINC(item_freq));
 
         // add path to fptree
-        FPNode* curr = root;
-        for (int j = (int)trxn.size() - 1; j >= 0; j--) {
-            Item item = trxn[j];
-            auto it = curr->child.find(item);
-            // if exist move curr, else create and move
-            if (it != curr->child.end()) {
-                curr = it->second;
-            } else {
-                FPNode* node = new FPNode(item);
-                node->parent = curr;
-                curr = curr->child[item] = node;
-                if (tail_table.find(item) == tail_table.end()) {
-                    hdr_table[item] = tail_table[item] = node;
-                } else {
-                    tail_table[item] = tail_table[item]->next = node;
-                }
-            }
-            curr->cnt++;
+        insertPath(trxn, tail_table, 1);
+    }
+}
+
+void FPTree::growth(FPNode* preroot, FPNode* prehead, const int& min_sup) {
+    // count frequency of current tree
+    for (FPNode* leaf = prehead; leaf != NULL; leaf = leaf->next) {
+        for (FPNode* curr = leaf->parent; curr != preroot; curr = curr->parent) {
+            item_freq[curr->item] += leaf->cnt;
         }
     }
+    for (auto& pair : item_freq) {
+        if (pair.second >= min_sup) {
+            items_by_freq.emplace_back(pair.first);
+        }
+    }
+    std::sort(items_by_freq.begin(), items_by_freq.end(), REFDEC(item_freq));
+
+    // construct conditional tree
+    std::unordered_map<Item, FPNode*> tail_table;
+    for (FPNode* leaf = prehead; leaf != NULL; leaf = leaf->next) {
+        // get path
+        Transaction trxn;
+        for (FPNode* curr = leaf->parent; curr != preroot; curr = curr->parent) {
+            if (item_freq[curr->item] >= min_sup)
+                trxn.emplace_back(curr->item);
+        }
+
+        // add path to conditional tree
+        insertPath(trxn, tail_table, leaf->cnt);
+    }
+}
+
+void FPTree::fpgrowthCombination(int idx, std::vector<Item>& lst, const std::string& base_str, std::ofstream& output_file, const size_t& trxns_size) {
+    if (idx == (int)items_by_freq.size())
+        return;
+
+    // Choose
+    Item currItem = items_by_freq[idx];
+    lst.emplace_back(currItem);
+
+    // output current combination
+    std::ostringstream oss;
+    oss << *lst.begin();
+    std::for_each(lst.begin() + 1, lst.end(), [&](const auto& item) {
+        oss << ',' << item;
+    });
+    oss << base_str;
+    oss << std::fixed << std::setprecision(4) << ':' << (double)item_freq[currItem] / trxns_size << '\n';
+    auto str = oss.str();
+    output_file.write(str.data(), str.size());
+
+    fpgrowthCombination(idx + 1, lst, base_str, output_file, trxns_size);
+    lst.pop_back();
+
+    // Not choose
+    fpgrowthCombination(idx + 1, lst, base_str, output_file, trxns_size);
 }
 
 void FPTree::fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size) {
@@ -204,27 +289,6 @@ void FPTree::fpgrowth(const std::string& output_filename, const int& min_sup, co
     }
 }
 
-void FPTree::fpgrowthCombination(int idx, std::vector<Item>& lst, const std::string& base_str, std::ofstream& output_file, const size_t& trxns_size) {
-    if (idx == (int)items_by_freq.size())
-        return;
-    // Choose
-    Item currItem = items_by_freq[idx];
-    lst.emplace_back(currItem);
-    std::ostringstream oss;
-    oss << *lst.begin();
-    std::for_each(lst.begin() + 1, lst.end(), [&](const auto& item) {
-        oss << ',' << item;
-    });
-    oss << base_str;
-    oss << std::fixed << std::setprecision(4) << ':' << (double)item_freq[currItem] / trxns_size << '\n';
-    auto str = oss.str();
-    output_file.write(str.data(), str.size());
-    fpgrowthCombination(idx + 1, lst, base_str, output_file, trxns_size);
-    lst.pop_back();
-    // Not choose
-    fpgrowthCombination(idx + 1, lst, base_str, output_file, trxns_size);
-}
-
 void FPTree::fpgrowth(Transaction& base, const int& min_sup, std::ofstream& output_file, const size_t& trxns_size) {
     if (hasSinglePath()) {
         std::ostringstream oss;
@@ -233,59 +297,15 @@ void FPTree::fpgrowth(Transaction& base, const int& min_sup, std::ofstream& outp
         });
         auto base_str = oss.str();
         std::vector<Item> lst;
+        TIMING_START(fpgrowth_combination);
         fpgrowthCombination(0, lst, base_str, output_file, trxns_size);
+        TIMING_ACCUM(fpgrowth_combination);
     } else {
         for (int i = (int)items_by_freq.size() - 1; i >= 0; i--) {
             Item baseItem = items_by_freq[i];
-            FPTree fptree;  // the conditional fptree
-            std::vector<Pattern> subfplist;
-
-            // count frequency of current tree
-            for (FPNode* leaf = hdr_table[baseItem]; leaf != NULL; leaf = leaf->next) {
-                for (FPNode* curr = leaf->parent; curr != root; curr = curr->parent) {
-                    fptree.item_freq[curr->item] += leaf->cnt;
-                }
-            }
-            for (int j = 0; j < MAXITEM; j++) {
-                if (fptree.item_freq[j] >= min_sup)
-                    fptree.items_by_freq.emplace_back(j);
-            }
-            std::sort(fptree.items_by_freq.begin(), fptree.items_by_freq.end(), REFDEC(fptree.item_freq));
-
-            // construct conditional tree
-            std::unordered_map<Item, FPNode*> tail_table;
-            for (FPNode* leaf = hdr_table[baseItem]; leaf != NULL; leaf = leaf->next) {
-                // get path
-                Transaction trxn;
-                for (FPNode* curr = leaf->parent; curr != root; curr = curr->parent) {
-                    if (fptree.item_freq[curr->item] >= min_sup)
-                        trxn.emplace_back(curr->item);
-                }
-
-                // add path to conditional tree
-                FPNode* curr = fptree.root;
-                for (int j = (int)trxn.size() - 1; j >= 0; j--) {
-                    Item item = trxn[j];
-                    auto it = curr->child.find(item);
-                    // if exist move curr, else create and move
-                    if (it != curr->child.end()) {
-                        curr = it->second;
-                    } else {
-                        FPNode* node = new FPNode(item);
-                        node->parent = curr;
-                        curr = curr->child[item] = node;
-                        if (tail_table.find(item) == tail_table.end()) {
-                            fptree.hdr_table[item] = tail_table[item] = node;
-                        } else {
-                            tail_table[item] = tail_table[item]->next = node;
-                        }
-                    }
-                    curr->cnt += leaf->cnt;
-                }
-            }
-
             base.emplace_back(baseItem);
 
+            // output base
             std::ostringstream oss;
             oss << *base.begin();
             std::for_each(base.begin() + 1, base.end(), [&](const auto& item) {
@@ -295,8 +315,12 @@ void FPTree::fpgrowth(Transaction& base, const int& min_sup, std::ofstream& outp
             auto str = oss.str();
             output_file.write(str.data(), str.size());
 
-            if (!fptree.empty()) {
-                fptree.fpgrowth(base, min_sup, output_file, trxns_size);
+            // build conditional fptree
+            FPTree cond_fptree;
+            cond_fptree.growth(root, hdr_table[baseItem], min_sup);
+
+            if (!cond_fptree.empty()) {
+                cond_fptree.fpgrowth(base, min_sup, output_file, trxns_size);
             }
             base.pop_back();
         }
@@ -308,11 +332,7 @@ bool FPTree::empty() {
 }
 
 bool FPTree::hasSinglePath() {
-    for (FPNode* curr = root; !curr->child.empty(); curr = curr->child.begin()->second) {
-        if (curr->child.size() > 1)
-            return false;
-    }
-    return true;
+    return singlePath;
 }
 
 void FPTree::traverse(FPNode* node) {
