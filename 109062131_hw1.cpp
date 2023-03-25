@@ -14,6 +14,7 @@
 #include <queue>
 #include <sstream>
 #include <stack>
+#include <unordered_map>
 #include <vector>
 
 #ifdef DEBUG
@@ -84,26 +85,20 @@ struct FPNode {
 };
 struct FPTree {
     FPNode* root;
-    std::array<FPNode*, MAXITEM> hdr_table;
-    std::vector<Item> items_by_freq;     // items above minimum support, sorts decreasing by freq
-    std::array<int, MAXITEM> item_freq;  // item frequency count
+    std::unordered_map<Item, FPNode*> hdr_table;
+    std::vector<Item> items_by_freq;          // items above minimum support, sorts decreasing by freqÇ
+    std::unordered_map<Item, int> item_freq;  // item frequency count
 
     FPTree() {
-        item_freq.fill(0);
         root = new FPNode(-1);
-        for (int i = 0; i < MAXITEM; i++) {
-            hdr_table[i] = new FPNode(-1);
-        }
     }
     ~FPTree() {
         deleteTree(root);
-        for (int i = 0; i < MAXITEM; i++) {
-            delete hdr_table[i];
-        }
     };
 
     void buildFromTrxns(const std::vector<Transaction>& trxns, const int& min_sup);
-    void fpgrowth(const Transaction& base, const int& min_sup, std::vector<Pattern>& fplist);
+    void fpgrowth(const int& min_sup, std::vector<Pattern>& fplist);
+    void fpgrowth(Transaction& base, const int& min_sup, std::vector<Pattern>& fplist);
 
     bool empty();
     bool hasSinglePath();
@@ -132,10 +127,10 @@ int main(int argc, char** argv) {
 
     DEBUG_MSG("Cpus: " << n_cpus);
 
-    std::vector<Transaction> trxns;  // transaction list
     int min_sup;
     FPTree fptree;
-    std::vector<Pattern> fplist;  // frequent patterns
+    std::vector<Transaction> trxns;  // transaction list
+    std::vector<Pattern> fplist;     // frequent patterns
 
     // input
     // build trxns and item_freq
@@ -155,7 +150,7 @@ int main(int argc, char** argv) {
 
     // fpgrowth
     TIMING_START(fpgrowth);
-    fptree.fpgrowth(Transaction(), min_sup, fplist);
+    fptree.fpgrowth(min_sup, fplist);
     TIMING_END(fpgrowth);
 
     // output
@@ -175,7 +170,7 @@ void FPTree::buildFromTrxns(const std::vector<Transaction>& trxns, const int& mi
     }
     std::sort(items_by_freq.begin(), items_by_freq.end(), REFDEC(item_freq));
 
-    std::array<FPNode*, MAXITEM> tail_table(hdr_table);
+    std::unordered_map<Item, FPNode*> tail_table;
     for (int i = 0; i < (int)trxns.size(); i++) {
         Transaction trxn;
         // prune infrequent items
@@ -198,14 +193,24 @@ void FPTree::buildFromTrxns(const std::vector<Transaction>& trxns, const int& mi
             } else {
                 FPNode* node = new FPNode(item);
                 node->parent = curr;
-                curr = tail_table[item] = curr->child[item] = tail_table[item]->next = node;
+                curr = curr->child[item] = node;
+                if (tail_table.find(item) == tail_table.end()) {
+                    hdr_table[item] = tail_table[item] = node;
+                } else {
+                    tail_table[item] = tail_table[item]->next = node;
+                }
             }
             curr->cnt++;
         }
     }
 }
 
-void FPTree::fpgrowth(const Transaction& base, const int& min_sup, std::vector<Pattern>& fplist) {
+void FPTree::fpgrowth(const int& min_sup, std::vector<Pattern>& fplist) {
+    Transaction base;
+    fpgrowth(base, min_sup, fplist);
+}
+
+void FPTree::fpgrowth(Transaction& base, const int& min_sup, std::vector<Pattern>& fplist) {
     if (hasSinglePath()) {
         std::vector<Pattern> subfplist;
         for (FPNode* curr = root; !curr->child.empty();) {
@@ -221,7 +226,7 @@ void FPTree::fpgrowth(const Transaction& base, const int& min_sup, std::vector<P
 
         if (!base.empty()) {
             for (auto& pattern : subfplist) {
-                pattern.first.insert(pattern.first.end(), base.begin(), base.end());
+                pattern.first.insert(pattern.first.begin(), base.begin(), base.end());
             }
         }
         fplist.insert(fplist.end(), subfplist.begin(), subfplist.end());
@@ -232,7 +237,7 @@ void FPTree::fpgrowth(const Transaction& base, const int& min_sup, std::vector<P
             std::vector<Pattern> subfplist;
 
             // count frequency of current tree
-            for (FPNode* leaf = hdr_table[baseItem]->next; leaf != NULL; leaf = leaf->next) {
+            for (FPNode* leaf = hdr_table[baseItem]; leaf != NULL; leaf = leaf->next) {
                 for (FPNode* curr = leaf->parent; curr != root; curr = curr->parent) {
                     fptree.item_freq[curr->item] += leaf->cnt;
                 }
@@ -244,8 +249,8 @@ void FPTree::fpgrowth(const Transaction& base, const int& min_sup, std::vector<P
             std::sort(fptree.items_by_freq.begin(), fptree.items_by_freq.end(), REFDEC(fptree.item_freq));
 
             // construct conditional tree
-            std::array<FPNode*, MAXITEM> tail_table(fptree.hdr_table);
-            for (FPNode* leaf = hdr_table[baseItem]->next; leaf != NULL; leaf = leaf->next) {
+            std::unordered_map<Item, FPNode*> tail_table;
+            for (FPNode* leaf = hdr_table[baseItem]; leaf != NULL; leaf = leaf->next) {
                 // get path
                 Transaction trxn;
                 for (FPNode* curr = leaf->parent; curr != root; curr = curr->parent) {
@@ -264,18 +269,23 @@ void FPTree::fpgrowth(const Transaction& base, const int& min_sup, std::vector<P
                     } else {
                         FPNode* node = new FPNode(item);
                         node->parent = curr;
-                        curr = tail_table[item] = curr->child[item] = tail_table[item]->next = node;
+                        curr = curr->child[item] = node;
+                        if (tail_table.find(item) == tail_table.end()) {
+                            fptree.hdr_table[item] = tail_table[item] = node;
+                        } else {
+                            tail_table[item] = tail_table[item]->next = node;
+                        }
                     }
                     curr->cnt += leaf->cnt;
                 }
             }
 
-            Transaction sub_base = base;
-            sub_base.emplace_back(baseItem);
-            fplist.emplace_back(sub_base, item_freq[baseItem]);
+            base.emplace_back(baseItem);
+            fplist.emplace_back(base, item_freq[baseItem]);
             if (!fptree.empty()) {
-                fptree.fpgrowth(sub_base, min_sup, fplist);
+                fptree.fpgrowth(base, min_sup, fplist);
             }
+            base.pop_back();
         }
     }
 }
@@ -313,24 +323,26 @@ void read_transactions(const std::string& input_filename, std::vector<Transactio
     std::ifstream input_file(input_filename);
     std::string str;
     trxns.reserve(MAXTRXNS);
-    while (getline(input_file, str)) {
-        Transaction trxn;
-        trxn.reserve(MAXTRXN);
-        size_t start = 0;
-        size_t end = str.find(',');
+    if (input_file.is_open()) {
+        while (getline(input_file, str)) {
+            Transaction trxn;
+            trxn.reserve(MAXTRXN);
+            size_t start = 0;
+            size_t end = str.find(',');
 
-        while (true) {
-            Item item = std::stoi(str.substr(start, end - start));
-            trxn.emplace_back(item);
-            fptree.item_freq[item]++;
-            if (end == std::string::npos)
-                break;
-            start = end + 1;
-            end = str.find(',', start);
+            while (true) {
+                Item item = std::stoi(str.substr(start, end - start));
+                trxn.emplace_back(item);
+                fptree.item_freq[item]++;
+                if (end == std::string::npos)
+                    break;
+                start = end + 1;
+                end = str.find(',', start);
+            }
+            trxns.emplace_back(trxn);
         }
-        trxns.emplace_back(trxn);
+        input_file.close();
     }
-    input_file.close();
 }
 
 // Define a function to output a single pattern to the output stream
