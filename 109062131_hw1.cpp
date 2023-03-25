@@ -13,7 +13,6 @@
 #include <map>
 #include <queue>
 #include <sstream>
-#include <stack>
 #include <unordered_map>
 #include <vector>
 
@@ -86,7 +85,7 @@ struct FPNode {
 struct FPTree {
     FPNode* root;
     std::unordered_map<Item, FPNode*> hdr_table;
-    std::vector<Item> items_by_freq;          // items above minimum support, sorts decreasing by freqÇ
+    std::vector<Item> items_by_freq;          // items above minimum support, sorts decreasing by frequency
     std::unordered_map<Item, int> item_freq;  // item frequency count
 
     FPTree() {
@@ -97,8 +96,9 @@ struct FPTree {
     };
 
     void buildFromTrxns(const std::vector<Transaction>& trxns, const int& min_sup);
-    void fpgrowth(const int& min_sup, std::vector<Pattern>& fplist);
-    void fpgrowth(Transaction& base, const int& min_sup, std::vector<Pattern>& fplist);
+    void fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size);
+    void fpgrowthCombination(int idx, std::vector<Item>& lst, const std::string& base, std::ofstream& output_file, const size_t& trxns_size);
+    void fpgrowth(Transaction& base, const int& min_sup, std::ofstream& ofs, const size_t& trxns_size);
 
     bool empty();
     bool hasSinglePath();
@@ -110,10 +110,6 @@ struct FPTree {
 
 // Read transactions from file and count item frequencies
 void read_transactions(const std::string& input_filename, std::vector<Transaction>& trxns, FPTree& fptree);
-// Define a function to output a single pattern to the output stream
-void output_pattern(std::ostringstream& oss, const Pattern& fp, size_t trxns_size);
-// Define a function to output the list of patterns to the output file
-void output_patterns(const std::string& output_filename, const std::vector<Pattern>& fplist, size_t trxns_size);
 
 int main(int argc, char** argv) {
     std::ios_base::sync_with_stdio(false);
@@ -130,7 +126,6 @@ int main(int argc, char** argv) {
     int min_sup;
     FPTree fptree;
     std::vector<Transaction> trxns;  // transaction list
-    std::vector<Pattern> fplist;     // frequent patterns
 
     // input
     // build trxns and item_freq
@@ -148,15 +143,10 @@ int main(int argc, char** argv) {
     fptree.buildFromTrxns(trxns, min_sup);
     TIMING_END(build_fptree);
 
-    // fpgrowth
-    TIMING_START(fpgrowth);
-    fptree.fpgrowth(min_sup, fplist);
-    TIMING_END(fpgrowth);
-
-    // output
-    TIMING_START(output);
-    output_patterns(output_filename, fplist, trxns.size());
-    TIMING_END(output);
+    // output once a pattern is found
+    TIMING_START(fpgrowth_and_output);
+    fptree.fpgrowth(output_filename, min_sup, trxns.size());
+    TIMING_END(fpgrowth_and_output);
     TIMING_END(total);
 
     return 0;
@@ -205,31 +195,45 @@ void FPTree::buildFromTrxns(const std::vector<Transaction>& trxns, const int& mi
     }
 }
 
-void FPTree::fpgrowth(const int& min_sup, std::vector<Pattern>& fplist) {
-    Transaction base;
-    fpgrowth(base, min_sup, fplist);
+void FPTree::fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size) {
+    std::ofstream output_file(output_filename);
+    if (output_file.is_open()) {
+        Transaction base;
+        fpgrowth(base, min_sup, output_file, trxns_size);
+        output_file.close();
+    }
 }
 
-void FPTree::fpgrowth(Transaction& base, const int& min_sup, std::vector<Pattern>& fplist) {
-    if (hasSinglePath()) {
-        std::vector<Pattern> subfplist;
-        for (FPNode* curr = root; !curr->child.empty();) {
-            curr = curr->child.begin()->second;
-            for (int i = (int)subfplist.size() - 1; i >= 0; i--) {
-                auto new_pattern = subfplist[i];
-                new_pattern.first.emplace_back(curr->item);
-                new_pattern.second = curr->cnt;
-                subfplist.emplace_back(new_pattern);
-            }
-            subfplist.emplace_back(Transaction(1, curr->item), curr->cnt);
-        }
+void FPTree::fpgrowthCombination(int idx, std::vector<Item>& lst, const std::string& base_str, std::ofstream& output_file, const size_t& trxns_size) {
+    if (idx == (int)items_by_freq.size())
+        return;
+    // Choose
+    Item currItem = items_by_freq[idx];
+    lst.emplace_back(currItem);
+    std::ostringstream oss;
+    oss << *lst.begin();
+    std::for_each(lst.begin() + 1, lst.end(), [&](const auto& item) {
+        oss << ',' << item;
+    });
+    oss << base_str;
+    oss << std::fixed << std::setprecision(4) << ':' << (double)item_freq[currItem] / trxns_size << '\n';
+    auto str = oss.str();
+    output_file.write(str.data(), str.size());
+    fpgrowthCombination(idx + 1, lst, base_str, output_file, trxns_size);
+    lst.pop_back();
+    // Not choose
+    fpgrowthCombination(idx + 1, lst, base_str, output_file, trxns_size);
+}
 
-        if (!base.empty()) {
-            for (auto& pattern : subfplist) {
-                pattern.first.insert(pattern.first.begin(), base.begin(), base.end());
-            }
-        }
-        fplist.insert(fplist.end(), subfplist.begin(), subfplist.end());
+void FPTree::fpgrowth(Transaction& base, const int& min_sup, std::ofstream& output_file, const size_t& trxns_size) {
+    if (hasSinglePath()) {
+        std::ostringstream oss;
+        std::for_each(base.begin(), base.end(), [&](const auto& item) {
+            oss << ',' << item;
+        });
+        auto base_str = oss.str();
+        std::vector<Item> lst;
+        fpgrowthCombination(0, lst, base_str, output_file, trxns_size);
     } else {
         for (int i = (int)items_by_freq.size() - 1; i >= 0; i--) {
             Item baseItem = items_by_freq[i];
@@ -281,9 +285,18 @@ void FPTree::fpgrowth(Transaction& base, const int& min_sup, std::vector<Pattern
             }
 
             base.emplace_back(baseItem);
-            fplist.emplace_back(base, item_freq[baseItem]);
+
+            std::ostringstream oss;
+            oss << *base.begin();
+            std::for_each(base.begin() + 1, base.end(), [&](const auto& item) {
+                oss << ',' << item;
+            });
+            oss << std::fixed << std::setprecision(4) << ':' << (double)item_freq[baseItem] / trxns_size << '\n';
+            auto str = oss.str();
+            output_file.write(str.data(), str.size());
+
             if (!fptree.empty()) {
-                fptree.fpgrowth(base, min_sup, fplist);
+                fptree.fpgrowth(base, min_sup, output_file, trxns_size);
             }
             base.pop_back();
         }
@@ -342,32 +355,5 @@ void read_transactions(const std::string& input_filename, std::vector<Transactio
             trxns.emplace_back(trxn);
         }
         input_file.close();
-    }
-}
-
-// Define a function to output a single pattern to the output stream
-void output_pattern(std::ostringstream& oss, const Pattern& fp, size_t trxns_size) {
-    oss << fp.first[0];
-    std::for_each(fp.first.begin() + 1, fp.first.end(), [&](const auto& item) {
-        oss << ',' << item;
-    });
-    oss << std::fixed << std::setprecision(4) << ':' << (double)fp.second / trxns_size << '\n';
-}
-
-// Define a function to output the list of patterns to the output file
-void output_patterns(const std::string& output_filename, const std::vector<Pattern>& fplist, size_t trxns_size) {
-    // Use ostringstream to buffer the output before writing to file
-    std::ostringstream oss;
-    oss.precision(4);
-    std::for_each(fplist.begin(), fplist.end(), [&](const auto& fp) {
-        output_pattern(oss, fp, trxns_size);
-    });
-
-    // Open output file and write the buffered output to it
-    std::ofstream output_file(output_filename);
-    if (output_file.is_open()) {
-        auto output_str = oss.str();
-        output_file.write(output_str.data(), output_str.size());
-        output_file.close();
     }
 }
