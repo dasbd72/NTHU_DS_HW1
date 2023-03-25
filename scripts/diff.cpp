@@ -23,6 +23,7 @@ struct FrequentPatterns {
 
     FrequentPatterns() {
         root = new Node();
+        _size = 0;
     }
     ~FrequentPatterns() {
         deleteTree(root);
@@ -41,6 +42,7 @@ struct FrequentPatterns {
         }
         if (curr->isfp()) {
             cerr << "Err: Repeated frequent patterns\n";
+            exit(1);
         }
 
         curr->freq = freq;
@@ -55,12 +57,13 @@ struct FrequentPatterns {
             if (it != curr->child.end()) {
                 curr = it->second;
             } else {
-                Node* node = new Node();
-                curr = curr->child[item] = node;
+                cerr << "Err: Pattern not matched \n";
+                exit(1);
             }
         }
         if (!curr->isfp()) {
             cerr << "Err: Frequent pattern not exist\n";
+            exit(1);
         }
         retFreq = curr->freq;
         curr->freq = -1;
@@ -93,6 +96,7 @@ FrequentPatterns parse(string filename) {
             size_t sep = str.find(':');
             if (sep == string::npos) {
                 cerr << "Err: Wrong format.\n";
+                exit(1);
             }
 
             freq = stof(str.substr(sep + 1, string::npos));
@@ -112,8 +116,10 @@ FrequentPatterns parse(string filename) {
             sort(pt.begin(), pt.end());
             fps.insert(pt, freq);
         }
+        file.close();
     } else {
         cerr << "Err: File not opened.\n";
+        exit(1);
     }
     cout << "Parsed " << filename << "\n";
     return fps;
@@ -149,10 +155,19 @@ void deparse(string filename, FrequentPatterns& fps) {
 
             if (fps.pop(pt) != freq) {
                 cerr << "Err: Freqeuncy not matched.\n";
+                exit(1);
             }
         }
+        file.close();
     } else {
         cerr << "Err: File not opened.\n";
+        exit(1);
+    }
+
+    if (fps.size() != 0) {
+        cerr << "Remain " << fps.size() << " lines.\n";
+        cerr << "Err: Not equal number of lines.\n";
+        exit(1);
     }
     cout << "Deparsed " << filename << "\n";
 }
@@ -164,9 +179,5 @@ int main(int argc, char** argv) {
 
     FrequentPatterns fps = parse(file1);
     deparse(file2, fps);
-
-    if (fps.size() != 0) {
-        cerr << "Err: Not equal number of lines.\n";
-    }
     cout << "Passed\n";
 }
