@@ -6,3 +6,5 @@ testcases
 !testcases/sample
 !testcases/sample.out
 outputs
+
+scripts/diff
