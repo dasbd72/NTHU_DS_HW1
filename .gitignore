@@ -8,3 +8,4 @@ testcases
 outputs
 
 scripts/diff
+scripts/seq
