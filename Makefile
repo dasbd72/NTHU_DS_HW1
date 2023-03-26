@@ -2,8 +2,9 @@ CC = gcc
 CXX = g++-11
 CFLAGS = -pthread -fopenmp -O2
 CFLAGS += -Wall -Wextra
-# CFLAGS += -DTIMING
-# CFLAGS += -DDEBUG
+CFLAGS += -DTIMING
+CFLAGS += -DDEBUG
+# CFLAGS += -DNOWRITE
 # CFLAGS += -g -fsanitize=address
 CXXFLAGS = -std=c++2a $(CFLAGS)
 
