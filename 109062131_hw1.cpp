@@ -72,6 +72,10 @@
 #define MAXITEM 1000
 // since 8700k has 250KB L2 cache per core
 #define MAXOSSBUF (256 * 1024)
+// // since 13400 has 9.5MB L2 cache per core
+// #define MAXOSSBUF (9 * 1024 * 1024)
+// set maximum threads available
+#define NCPUS 64
 #define REFINC(_ref) [&](int x, int y) { \
     if (_ref[x] != _ref[y])              \
         return _ref[x] < _ref[y];        \
@@ -118,10 +122,11 @@ struct FPTree {
 
     void insertPath(const Transaction& trxn, std::unordered_map<Item, FPNode*>& tail_table, const int& inc);
     void buildFromTrxns(const std::vector<Transaction>& trxns, const int& min_sup);
-    void fpgrowthCombination(int idx, std::vector<Item>& lst, std::string&& base, std::ofstream& output_file, size_t trxns_size, std::ostringstream& oss);
+    void fpgrowthCombinationThread(int idx, std::vector<Item>& lst, std::string&& base, std::ofstream& output_file, size_t trxns_size, std::ostringstream& oss);
+    void fpgrowthCombination(std::string&& base_str, std::ofstream& output_file, const size_t& trxns_size, std::array<std::ostringstream, NCPUS>& oss_arr, const int& n_cpus);
     void growth(FPNode* preroot, FPNode* prehead, const int& min_sup);
-    void fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size);
-    void fpgrowth(Transaction& base, const int& min_sup, std::ofstream& output_file, const size_t& trxns_size, std::ostringstream& oss, std::ostringstream& base_oss);
+    void fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size, const int& n_cpus);
+    void fpgrowth(Transaction& base, const int& min_sup, std::ofstream& output_file, const size_t& trxns_size, std::array<std::ostringstream, NCPUS>& oss_arr, std::ostringstream& base_oss, const int& n_cpus);
 
     bool empty();
     bool hasSinglePath();
@@ -146,7 +151,7 @@ int main(int argc, char** argv) {
     double fmin_sup = atof(argv[1]);
     std::string input_filename = argv[2];
     std::string output_filename = argv[3];
-    int n_cpus = omp_get_max_threads();
+    int n_cpus = std::min(omp_get_max_threads(), NCPUS);
 
     DEBUG_MSG("Cpus: " << n_cpus);
 
@@ -172,7 +177,7 @@ int main(int argc, char** argv) {
 
     // output once a pattern is found
     TIMING_START(fpgrowth_and_output);
-    fptree.fpgrowth(output_filename, min_sup, trxns.size());
+    fptree.fpgrowth(output_filename, min_sup, trxns.size(), n_cpus);
     TIMING_END(fpgrowth_and_output);
     TIMING_END(total);
 
@@ -228,7 +233,7 @@ void FPTree::buildFromTrxns(const std::vector<Transaction>& trxns, const int& mi
     }
 }
 
-void FPTree::fpgrowthCombination(int idx, std::vector<Item>& lst, std::string&& base_str, std::ofstream& output_file, size_t trxns_size, std::ostringstream& oss) {
+void FPTree::fpgrowthCombinationThread(int idx, std::vector<Item>& lst, std::string&& base_str, std::ofstream& output_file, size_t trxns_size, std::ostringstream& oss) {
     if (idx == (int)items_by_freq.size())
         return;
 
@@ -246,15 +251,50 @@ void FPTree::fpgrowthCombination(int idx, std::vector<Item>& lst, std::string&& 
     if (oss.tellp() >= MAXOSSBUF) {
         auto str = oss.str();
 #ifndef NOWRITE
+#pragma omp critical
         output_file.write(str.data(), str.size());
 #endif
         reset_oss(oss);
     }
-    fpgrowthCombination(idx + 1, lst, std::move(base_str), output_file, trxns_size, oss);
+    fpgrowthCombinationThread(idx + 1, lst, std::move(base_str), output_file, trxns_size, oss);
     lst.pop_back();
 
     // Not choose
-    fpgrowthCombination(idx + 1, lst, std::move(base_str), output_file, trxns_size, oss);
+    fpgrowthCombinationThread(idx + 1, lst, std::move(base_str), output_file, trxns_size, oss);
+}
+
+void FPTree::fpgrowthCombination(std::string&& base_str, std::ofstream& output_file, const size_t& trxns_size, std::array<std::ostringstream, NCPUS>& oss_arr, const int& n_cpus) {
+    std::deque<std::pair<int, std::vector<Item>>> que;
+    que.emplace_back(0, std::vector<Item>());
+    while ((int)que.size() < n_cpus) {
+        auto pair = que.front();
+        if (pair.first == (int)items_by_freq.size())
+            break;
+        que.pop_front();
+        Item currItem = items_by_freq[pair.first];
+        pair.first++;
+        // choose
+        pair.second.emplace_back(currItem);
+        // output current combination
+        int ioss = currItem % NCPUS;
+        oss_arr[ioss] << *pair.second.begin();
+        std::for_each(pair.second.begin() + 1, pair.second.end(), [&](const auto& item) {
+            oss_arr[ioss] << ',' << item;
+        });
+        oss_arr[ioss] << base_str;
+        oss_arr[ioss] << std::fixed << std::setprecision(4) << ':' << (double)item_freq[currItem] / trxns_size << '\n';
+        que.emplace_back(pair);
+        // remove
+        pair.second.pop_back();
+        // not choose
+        que.emplace_back(pair);
+    }
+
+#pragma omp parallel for
+    for (int i = 0; i < (int)que.size(); i++) {
+        que[i].second.reserve(items_by_freq.size());
+        fpgrowthCombinationThread(que[i].first, que[i].second, std::move(base_str), output_file, trxns_size, oss_arr[i]);
+    }
 }
 
 void FPTree::growth(FPNode* preroot, FPNode* prehead, const int& min_sup) {
@@ -286,82 +326,82 @@ void FPTree::growth(FPNode* preroot, FPNode* prehead, const int& min_sup) {
     }
 }
 
-void FPTree::fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size) {
+void FPTree::fpgrowth(const std::string& output_filename, const int& min_sup, const size_t& trxns_size, const int& n_cpus) {
     std::ofstream output_file(output_filename);
     if (output_file.is_open()) {
         Transaction base;
-        std::ostringstream oss;
+        std::array<std::ostringstream, NCPUS> oss_arr;
         std::ostringstream base_oss;
         if (hasSinglePath()) {
-            std::vector<Item> lst;
             std::string base_str = "";
-            lst.reserve(MAXTRXN);
-            fpgrowthCombination(0, lst, std::move(base_str), output_file, trxns_size, oss);
+            fpgrowthCombination(std::move(base_str), output_file, trxns_size, oss_arr, n_cpus);
         } else {
             for (int i = (int)items_by_freq.size() - 1; i >= 0; i--) {
                 Item baseItem = items_by_freq[i];
                 base.emplace_back(baseItem);
 
                 // output base
-                oss << *base.begin();
+                int ioss = i % NCPUS;
+                oss_arr[ioss] << *base.begin();
                 std::for_each(base.begin() + 1, base.end(), [&](const auto& item) {
-                    oss << ',' << item;
+                    oss_arr[ioss] << ',' << item;
                 });
-                oss << std::fixed << std::setprecision(4) << ':' << (double)item_freq[baseItem] / trxns_size << '\n';
+                oss_arr[ioss] << std::fixed << std::setprecision(4) << ':' << (double)item_freq[baseItem] / trxns_size << '\n';
                 // build conditional fptree
                 FPTree cond_fptree;
                 cond_fptree.growth(root, hdr_table[baseItem], min_sup);
 
                 if (!cond_fptree.empty()) {
-                    cond_fptree.fpgrowth(base, min_sup, output_file, trxns_size, oss, base_oss);
+                    cond_fptree.fpgrowth(base, min_sup, output_file, trxns_size, oss_arr, base_oss, n_cpus);
                 }
                 base.pop_back();
             }
         }
-        auto str = oss.str();
+        for (auto& oss : oss_arr) {
+            auto str = oss.str();
 #ifndef NOWRITE
-        output_file.write(str.data(), str.size());
+            output_file.write(str.data(), str.size());
 #endif
+        }
         output_file.close();
     }
 }
 
 void FPTree::fpgrowth(Transaction& base, const int& min_sup,
                       std::ofstream& output_file, const size_t& trxns_size,
-                      std::ostringstream& oss, std::ostringstream& base_oss) {
+                      std::array<std::ostringstream, NCPUS>& oss_arr, std::ostringstream& base_oss, const int& n_cpus) {
     if (hasSinglePath()) {
         reset_oss(base_oss);
         std::for_each(base.begin(), base.end(), [&](const auto& item) {
             base_oss << ',' << item;
         });
         std::string base_str = base_oss.str();
-        std::vector<Item> lst;
-        lst.reserve(MAXTRXN);
-        fpgrowthCombination(0, lst, std::move(base_str), output_file, trxns_size, oss);
+        fpgrowthCombination(std::move(base_str), output_file, trxns_size, oss_arr, n_cpus);
     } else {
         for (int i = (int)items_by_freq.size() - 1; i >= 0; i--) {
             Item baseItem = items_by_freq[i];
             base.emplace_back(baseItem);
 
             // output base
-            oss << *base.begin();
+            int ioss = i % NCPUS;
+            oss_arr[ioss] << *base.begin();
             std::for_each(base.begin() + 1, base.end(), [&](const auto& item) {
-                oss << ',' << item;
+                oss_arr[ioss] << ',' << item;
             });
-            oss << std::fixed << std::setprecision(4) << ':' << (double)item_freq[baseItem] / trxns_size << '\n';
-            if (oss.tellp() >= MAXOSSBUF) {
-                auto str = oss.str();
+            oss_arr[ioss] << std::fixed << std::setprecision(4) << ':' << (double)item_freq[baseItem] / trxns_size << '\n';
+            if (oss_arr[ioss].tellp() >= MAXOSSBUF) {
+                auto str = oss_arr[ioss].str();
 #ifndef NOWRITE
                 output_file.write(str.data(), str.size());
 #endif
-                reset_oss(oss);
+                reset_oss(oss_arr[ioss]);
             }
             // build conditional fptree
             FPTree cond_fptree;
             cond_fptree.growth(root, hdr_table[baseItem], min_sup);
 
             if (!cond_fptree.empty()) {
-                cond_fptree.fpgrowth(base, min_sup, output_file, trxns_size, oss, base_oss);
+                cond_fptree.fpgrowth(base, min_sup, output_file, trxns_size, oss_arr, base_oss, n_cpus);
             }
             base.pop_back();
         }
