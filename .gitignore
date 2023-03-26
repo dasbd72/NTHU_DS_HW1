@@ -5,7 +5,9 @@
 testcases
 !testcases/sample
 !testcases/sample.out
+!testcases/testcases.zip
 outputs
 
 scripts/diff
 scripts/seq
+seq
